@@ -244,7 +244,7 @@ async def test_password_login_invalidates_pending_browser_callback(
     """Switching login mechanisms cannot later reuse the old browser attempt."""
     url = await client.begin_login()
     mocked.get(re.compile(AUTHORIZATION_ENDPOINT + ".*"), status=403)
-    with pytest.raises(CookidooAuthException):
+    with pytest.raises(CookidooRequestException):
         await client.login()
     with pytest.raises(CookidooAuthException, match="No browser login"):
         await client.complete_login(callback(url))

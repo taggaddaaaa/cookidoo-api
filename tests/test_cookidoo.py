@@ -28,6 +28,7 @@ from cookidoo_api.exceptions import (
     CookidooException,
     CookidooParseException,
     CookidooRequestException,
+    CookidooUnavailableException,
 )
 from cookidoo_api.helpers import get_localization_options
 from cookidoo_api.raw_types import CustomRecipeJSON, CustomRecipesJSON
@@ -246,12 +247,13 @@ class TestLogin:
     async def test_login_page_unreachable(
         self, mocked: aioresponses, cookidoo: Cookidoo
     ) -> None:
-        """Test login when the authorize/login page returns an error."""
+        """An unreachable login page is a server problem, not a credential one."""
         mocked.get(OIDC_DISCOVERY_URL, payload=COOKIDOO_TEST_OIDC_DISCOVERY)
         mocked.get(AUTHZ_RE, status=HTTPStatus.SERVICE_UNAVAILABLE)
 
-        with pytest.raises(CookidooAuthException, match="could not reach login page"):
+        with pytest.raises(CookidooUnavailableException, match="Login page") as caught:
             await cookidoo.login()
+        assert caught.value.status == HTTPStatus.SERVICE_UNAVAILABLE
 
     async def test_login_page_parse_error(
         self, mocked: aioresponses, cookidoo: Cookidoo
@@ -380,7 +382,7 @@ class TestLogin:
             repeat=True,
         )
 
-        with pytest.raises(CookidooAuthException, match="invalid credentials"):
+        with pytest.raises(CookidooRequestException, match="redirected too many times"):
             await cookidoo.login()
 
     async def test_login_token_exchange_failure(

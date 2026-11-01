@@ -23,6 +23,12 @@ LOGIN_HEADERS: Final = {
 CIAM_BASE_URL: Final = "https://ciam.prod.cookidoo.vorwerk-digital.com"
 CIAM_LOGIN_SRV_URL: Final = f"{CIAM_BASE_URL}/login-srv/login"
 OIDC_DISCOVERY_URL: Final = f"{CIAM_BASE_URL}/.well-known/openid-configuration"
+# The discovery document fields the login and refresh flows rely on.
+OIDC_REQUIRED_ENDPOINTS: Final = ("authorization_endpoint", "token_endpoint")
+# Redirect hops followed while submitting credentials before giving up.
+LOGIN_MAX_REDIRECTS: Final = 10
+# Longest response body written to the debug log.
+LOG_BODY_LENGTH: Final = 2000
 
 # OAuth2 / OIDC client. The bearer token it yields works against the same
 # api_endpoint as the previous cookie session, and additionally reaches the
