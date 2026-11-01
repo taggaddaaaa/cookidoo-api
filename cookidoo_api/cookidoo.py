@@ -9,7 +9,7 @@ from enum import StrEnum
 import hashlib
 from http import HTTPStatus
 import json
-from json import JSONDecodeError
+from json import loads as response_json_loads
 import logging
 import os
 from pathlib import Path
@@ -20,7 +20,7 @@ import traceback
 from typing import TypeVar, cast
 from urllib.parse import parse_qs, urljoin, urlparse
 
-from aiohttp import ClientError, ClientSession
+from aiohttp import ClientError, ClientResponse, ClientSession
 from yarl import URL
 
 from cookidoo_api.const import (
@@ -30,11 +30,14 @@ from cookidoo_api.const import (
     CUSTOM_RECIPES_PATH_ACCEPT,
     DEFAULT_API_HEADERS,
     HAL_ACCEPT,
+    LOG_BODY_LENGTH,
     LOGIN_HEADERS,
+    LOGIN_MAX_REDIRECTS,
     MANAGED_COLLECTIONS_PATH_ACCEPT,
     MOBILE_HOME_PATH,
     OAUTH_SCOPE,
     OIDC_DISCOVERY_URL,
+    OIDC_REQUIRED_ENDPOINTS,
     PUSH_BUNDLE_ID,
     PUSH_PLATFORM,
     REL_RMI_CONFIG,
@@ -50,6 +53,8 @@ from cookidoo_api.exceptions import (
     CookidooException,
     CookidooParseException,
     CookidooRequestException,
+    CookidooResponseException,
+    CookidooUnavailableException,
 )
 from cookidoo_api.helpers import (
     cookidoo_additional_item_from_json,
@@ -266,72 +271,127 @@ class Cookidoo:
 
         """
         await self._ensure_token()
-        merged_headers = {**self._api_headers, **(headers or {})}
 
-        try:
-            async with self._session.request(
-                method, url, headers=merged_headers, json=json, params=params
-            ) as r:
+        # A 401 with a refresh token in hand is retried once after a forced
+        # refresh: the server may have revoked the access token early, or the
+        # local clock may be off, in which case ``expires_at`` is misleading.
+        for attempt in range(2):
+            try:
+                async with self._session.request(
+                    method,
+                    url,
+                    headers={**self._api_headers, **(headers or {})},
+                    json=json,
+                    params=params,
+                ) as r:
+                    if r.status == HTTPStatus.UNAUTHORIZED:
+                        self._log_response(url, r.status, await r.text())
+                        if attempt == 0 and await self._refresh_after_401(operation):
+                            continue
+                        self._raise_auth_exception(operation)
+
+                    if r.status not in accepted_statuses:
+                        body = await r.text()
+                        self._log_response(url, r.status, body)
+                        raise self._status_exception(operation, r.status, body)
+
+                    if r.status == HTTPStatus.NO_CONTENT or not parse_response:
+                        return None
+                    return await self._read_json(r, operation, url)
+
+            except CookidooException:
+                raise
+            except TimeoutError as e:
                 _LOGGER.debug(
-                    "Response from %s [%s]: %s", url, r.status, await r.text()
+                    "Exception: Cannot %s:\n%s", operation, traceback.format_exc()
                 )
+                raise CookidooUnavailableException(
+                    f"{operation.capitalize()} failed due to connection timeout."
+                ) from e
+            except ClientError as e:
+                _LOGGER.debug(
+                    "Exception: Cannot %s:\n%s", operation, traceback.format_exc()
+                )
+                raise CookidooUnavailableException(
+                    f"{operation.capitalize()} failed due to request exception."
+                ) from e
+        raise AssertionError("unreachable")  # pragma: no cover
 
-                if r.status == HTTPStatus.UNAUTHORIZED:
-                    try:
-                        errmsg = await r.json()
-                    except (JSONDecodeError, ClientError):
-                        _LOGGER.debug(
-                            "Exception: Cannot parse request response:\n %s",
-                            traceback.format_exc(),
-                        )
-                    else:
-                        _LOGGER.debug(
-                            "Exception: Cannot %s: %s",
-                            operation,
-                            errmsg.get("error_description", ""),
-                        )
-                    self._raise_auth_exception(operation)
+    async def _refresh_after_401(self, operation: str) -> bool:
+        """Force a token refresh after a 401; return whether a retry makes sense.
 
-                if r.status not in accepted_statuses:
-                    r.raise_for_status()
-
-                if r.status == HTTPStatus.NO_CONTENT:
-                    return None
-                if not parse_response:
-                    return None
-                try:
-                    result: object = await r.json()
-                except (JSONDecodeError, KeyError) as e:
-                    _LOGGER.debug(
-                        "Exception: Cannot parse %s response:\n%s",
-                        operation,
-                        traceback.format_exc(),
-                    )
-                    raise CookidooParseException(
-                        f"{operation.capitalize()} failed during parsing of request response."
-                    ) from e
-                else:
-                    return result
-
-        except (
-            CookidooAuthException,
-            CookidooRequestException,
-            CookidooParseException,
-        ):
-            raise
-        except TimeoutError as e:
+        A refresh that itself fails leaves the original 401 as the honest
+        classification (the token was rejected and could not be renewed), so
+        the auth exception is raised with the refresh failure as its cause.
+        """
+        if self._refresh_token is None:
+            return False
+        try:
+            async with self._token_lock:
+                await self.refresh()
+        except CookidooException as e:
             _LOGGER.debug(
-                "Exception: Cannot %s:\n%s", operation, traceback.format_exc()
+                "Exception: Cannot %s, refresh after 401 failed:\n%s",
+                operation,
+                traceback.format_exc(),
             )
-            raise CookidooRequestException(
-                f"{operation.capitalize()} failed due to connection timeout."
+            raise CookidooAuthException(
+                f"{operation.capitalize()} failed due to authorization failure, "
+                "the authorization token was rejected and could not be refreshed."
             ) from e
-        except ClientError as e:
+        return True
+
+    @staticmethod
+    def _log_response(url: URL | str, status: int, body: str) -> None:
+        """Log a response body at debug level, truncated."""
+        if _LOGGER.isEnabledFor(logging.DEBUG):
             _LOGGER.debug(
-                "Exception: Cannot %s:\n%s", operation, traceback.format_exc()
+                "Response from %s [%s]: %.*s", url, status, LOG_BODY_LENGTH, body
             )
-            raise CookidooRequestException(
-                f"{operation.capitalize()} failed due to request exception."
+
+    @staticmethod
+    def _status_exception(
+        operation: str, status: int, body: str | None = None
+    ) -> CookidooRequestException:
+        """Build the exception for an unexpected HTTP status.
+
+        5xx and 429 are transient (``CookidooUnavailableException``); any
+        other status is a plain request failure. Both carry the status and an
+        excerpt of the body, so callers can tell a 404 from a 422 and read the
+        server's message.
+        """
+        label = operation.capitalize()
+        if status >= 500 or status == HTTPStatus.TOO_MANY_REQUESTS:
+            return CookidooUnavailableException(
+                f"{label} failed, the server is unavailable.",
+                status=status,
+                body=body,
+            )
+        return CookidooRequestException(
+            f"{label} failed with an unexpected status.", status=status, body=body
+        )
+
+    async def _read_json(
+        self, response: ClientResponse, operation: str, url: URL | str
+    ) -> object:
+        """Parse a successful response as JSON whatever its content type.
+
+        A Cloudflare or maintenance page answers 200 with HTML; that surfaces
+        as a ``CookidooResponseException`` (a parse error), not as a transport
+        error, so callers can tell it apart from a dropped connection.
+        """
+        body = await response.text()
+        self._log_response(url, response.status, body)
+        try:
+            return cast(object, response_json_loads(body))
+        except ValueError as e:
+            _LOGGER.debug(
+                "Exception: Cannot parse %s response:\n%s",
+                operation,
+                traceback.format_exc(),
+            )
+            raise CookidooResponseException(
+                f"{operation.capitalize()} failed during parsing of request response."
             ) from e
 
     @staticmethod
@@ -606,9 +666,11 @@ class Cookidoo:
             self._assert_login_generation(generation)
             self._apply_tokens(payload)
         except TimeoutError as e:
-            raise CookidooRequestException("Authorization exchange timed out.") from e
+            raise CookidooUnavailableException(
+                "Authorization exchange timed out."
+            ) from e
         except ClientError as e:
-            raise CookidooRequestException("Authorization exchange failed.") from e
+            raise CookidooUnavailableException("Authorization exchange failed.") from e
         except CookidooAuthException:
             raise CookidooAuthException(
                 "Authorization exchange was rejected."
@@ -671,8 +733,8 @@ class Cookidoo:
                 allow_redirects=True,
                 headers=LOGIN_HEADERS,
             ) as resp:
-                self._check_login_page_status(resp.status)
                 login_html = await resp.text()
+                self._check_login_page_status(resp.status, login_html)
 
             # Step 3: submit credentials, Step 4: capture the authorization code
             request_id = self._extract_request_id(login_html)
@@ -681,16 +743,16 @@ class Cookidoo:
             # Step 5: exchange the code for tokens, which marks us logged in
             await self._exchange_code(oidc["token_endpoint"], code, verifier)
 
-        except (CookidooAuthException, CookidooParseException):
+        except CookidooException:
             raise
         except TimeoutError as e:
             _LOGGER.debug("Exception: Login failed:\n %s", traceback.format_exc())
-            raise CookidooRequestException(
+            raise CookidooUnavailableException(
                 "Authentication failed due to connection timeout."
             ) from e
         except ClientError as e:
             _LOGGER.debug("Exception: Login failed:\n %s", traceback.format_exc())
-            raise CookidooRequestException(
+            raise CookidooUnavailableException(
                 "Authentication failed due to request exception."
             ) from e
 
@@ -705,7 +767,11 @@ class Cookidoo:
             If the OAuth2 client id or redirect uri was overridden with an
             empty value.
         CookidooRequestException
-            If the discovery or token request fails or times out.
+            If the discovery or token request fails or times out. 5xx and 429
+            answers raise the ``CookidooUnavailableException`` subclass: the
+            refresh token is still good, only the server is not.
+        CookidooParseException
+            If the discovery document or the token response cannot be parsed.
 
         """
         if self._refresh_token is None:
@@ -724,26 +790,42 @@ class Cookidoo:
                 },
                 headers=LOGIN_HEADERS,
             ) as resp:
-                if resp.status != HTTPStatus.OK:
-                    raise CookidooAuthException(
-                        f"Token refresh failed (status {resp.status})."
-                    )
-                payload = cast(dict[str, object], await resp.json())
+                payload = await self._token_payload(resp, "Token refresh")
         except TimeoutError as e:
             _LOGGER.debug(
                 "Exception: Token refresh failed:\n %s", traceback.format_exc()
             )
-            raise CookidooRequestException(
+            raise CookidooUnavailableException(
                 "Token refresh failed due to connection timeout."
             ) from e
         except ClientError as e:
             _LOGGER.debug(
                 "Exception: Token refresh failed:\n %s", traceback.format_exc()
             )
-            raise CookidooRequestException(
+            raise CookidooUnavailableException(
                 "Token refresh failed due to request exception."
             ) from e
         self._apply_tokens(payload)
+
+    async def _token_payload(
+        self, resp: ClientResponse, operation: str
+    ) -> dict[str, object]:
+        """Classify a token endpoint answer and return its JSON payload.
+
+        Only 400 and 401 mean the grant was rejected (``invalid_grant`` and
+        friends): those are auth failures. Anything else is the server's
+        problem, not the credentials'.
+        """
+        if resp.status in (HTTPStatus.BAD_REQUEST, HTTPStatus.UNAUTHORIZED):
+            raise CookidooAuthException(f"{operation} failed (status {resp.status}).")
+        if resp.status != HTTPStatus.OK:
+            raise self._status_exception(operation, resp.status, await resp.text())
+        payload = await self._read_json(resp, operation, resp.url)
+        if not isinstance(payload, Mapping):
+            raise CookidooParseException(
+                f"{operation} failed during parsing of request response."
+            )
+        return dict(payload)
 
     def save_token(self, path: str | Path) -> None:
         """Save the OAuth2 tokens to a file for later reuse.
@@ -790,13 +872,37 @@ class Cookidoo:
 
     # -- internal auth helpers --------------------------------------------
     async def _discovery(self) -> dict[str, str]:
-        """Fetch and cache the OIDC discovery document."""
+        """Fetch, validate and cache the OIDC discovery document.
+
+        Raises
+        ------
+        CookidooRequestException
+            If the discovery endpoint answers with an error status.
+        CookidooParseException
+            If the document is not JSON or lacks the endpoints the flows need.
+
+        """
         if self._oidc is None:
             async with self._session.get(
                 URL(OIDC_DISCOVERY_URL), headers=LOGIN_HEADERS
             ) as resp:
-                resp.raise_for_status()
-                self._oidc = cast(dict[str, str], await resp.json())
+                if resp.status != HTTPStatus.OK:
+                    raise self._status_exception(
+                        "OIDC discovery", resp.status, await resp.text()
+                    )
+                document = await self._read_json(resp, "OIDC discovery", resp.url)
+            if not isinstance(document, Mapping) or not all(
+                isinstance(document.get(key), str) and document.get(key)
+                for key in OIDC_REQUIRED_ENDPOINTS
+            ):
+                raise CookidooParseException(
+                    "OIDC discovery document is incomplete: expected "
+                    + ", ".join(OIDC_REQUIRED_ENDPOINTS)
+                    + "."
+                )
+            self._oidc = {
+                key: cast(str, document[key]) for key in OIDC_REQUIRED_ENDPOINTS
+            }
         return self._oidc
 
     async def _submit_credentials(self, request_id: str, state: str) -> str:
@@ -813,7 +919,7 @@ class Cookidoo:
         }
         method = "post"
         code: str | None = None
-        for _ in range(10):
+        for _ in range(LOGIN_MAX_REDIRECTS):
             async with self._session.request(
                 method,
                 URL(url),
@@ -836,7 +942,17 @@ class Cookidoo:
                     self._assert_ciam_origin(url)
                     method, data = "get", None
                     continue
+                if resp.status != HTTPStatus.OK:
+                    # A 403 (Cloudflare), 503 or similar is not a credential
+                    # problem; only a re-rendered login form (200) is.
+                    raise self._status_exception(
+                        "Login", resp.status, await resp.text()
+                    )
                 break
+        else:
+            raise CookidooRequestException(
+                "Login failed: the login flow redirected too many times."
+            )
         if code is None:
             raise CookidooAuthException(
                 "Login failed: invalid credentials (no authorization code "
@@ -858,13 +974,15 @@ class Cookidoo:
                 f"Login flow redirected off the authentication host: {url}"
             )
 
-    @staticmethod
-    def _check_login_page_status(status: int) -> None:
-        """Check login page response status."""
+    def _check_login_page_status(self, status: int, body: str) -> None:
+        """Check login page response status.
+
+        The login page is served before any credential is sent, so a bad
+        status here is never an auth failure: it is the server (5xx, 429) or
+        a blocked request (403), and reported as such.
+        """
         if status != HTTPStatus.OK:
-            raise CookidooAuthException(
-                f"Login flow failed: could not reach login page (status {status})."
-            )
+            raise self._status_exception("Login page", status, body)
 
     async def _exchange_code(
         self, token_endpoint: str, code: str, verifier: str
@@ -889,12 +1007,7 @@ class Cookidoo:
             },
             headers=LOGIN_HEADERS,
         ) as resp:
-            if resp.status != HTTPStatus.OK:
-                raise CookidooAuthException(
-                    f"Token exchange failed (status {resp.status})."
-                )
-            payload = cast(dict[str, object], await resp.json())
-        return payload
+            return await self._token_payload(resp, "Token exchange")
 
     def _apply_tokens(self, payload: dict[str, object]) -> None:
         """Store tokens from a token-endpoint response and set the auth header."""
@@ -3104,11 +3217,14 @@ class Cookidoo:
         """
         try:
             return await self.get_custom_recipe(recipe_id)
-        except (CookidooRequestException, CookidooParseException):
+        except CookidooRequestException as e:
+            # Only a recipe that no longer exists is skipped. A timeout, a
+            # 5xx or any other failure is raised, so an outage does not look
+            # like a week with fewer recipes.
+            if e.status != HTTPStatus.NOT_FOUND:
+                raise
             _LOGGER.debug(
-                "Could not resolve custom recipe %s planned in calendar",
-                recipe_id,
-                exc_info=True,
+                "Custom recipe %s planned in calendar no longer exists", recipe_id
             )
             return None
 
