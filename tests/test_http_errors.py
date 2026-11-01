@@ -110,7 +110,7 @@ async def test_transient_statuses_are_unavailable(
 
 @pytest.mark.parametrize(
     "status",
-    [HTTPStatus.NOT_FOUND, HTTPStatus.CONFLICT, HTTPStatus.UNPROCESSABLE_CONTENT],
+    [HTTPStatus.NOT_FOUND, HTTPStatus.CONFLICT, HTTPStatus.UNPROCESSABLE_ENTITY],
 )
 async def test_client_errors_keep_status_and_server_message(
     mocked: aioresponses, cookidoo: Cookidoo, status: HTTPStatus
