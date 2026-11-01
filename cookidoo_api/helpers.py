@@ -1,6 +1,7 @@
 """Cookidoo API helpers."""
 
 from collections.abc import Mapping, Sequence
+import copy
 from datetime import UTC, datetime
 import json
 import logging
@@ -578,21 +579,38 @@ def _parse_annotation_temperature(
     )
 
 
-def _annotation_slot(text: str, position: object) -> str:
-    """Read a complete UTF-16 span without splitting surrogate pairs."""
+def _annotation_slot(text: str, position: object) -> tuple[str, int | None]:
+    """Read a complete UTF-16 span without splitting surrogate pairs.
+
+    Returns the slot text and its UTF-16 offset, or ``("", None)`` when the
+    position is missing or does not fit the text.
+    """
     if not isinstance(position, Mapping):
-        return ""
+        return "", None
     offset, length = position.get("offset"), position.get("length")
     if type(offset) is not int or type(length) is not int or offset < 0 or length < 0:
-        return ""
+        return "", None
     encoded = text.encode("utf-16-le")
     start, end = offset * 2, (offset + length) * 2
     if end > len(encoded):
-        return ""
+        return "", None
     try:
-        return encoded[start:end].decode("utf-16-le")
+        return encoded[start:end].decode("utf-16-le"), offset
     except UnicodeDecodeError:
-        return ""
+        return "", None
+
+
+def _speed_text(value: object) -> str | None:
+    """Keep a speed as text; the API sometimes sends numbers."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int | float):
+        return str(int(value)) if float(value).is_integer() else str(value)
+    return value if isinstance(value, str) else None
+
+
+_TTS_FIELDS = frozenset({"time", "temperature", "speed", "direction"})
+_MODE_FIELDS = _TTS_FIELDS | {"mode", "power", "accessory"}
 
 
 def _parse_custom_recipe_annotation(
@@ -613,7 +631,7 @@ def _parse_custom_recipe_annotation(
     if not isinstance(annotation_type, str) or not isinstance(data, Mapping):
         return None
 
-    slot = _annotation_slot(instruction_text, position)
+    slot, offset = _annotation_slot(instruction_text, position)
     name_value = value.get("name")
     name = name_value if isinstance(name_value, str) else None
     annotation_data = dict(data)
@@ -621,10 +639,9 @@ def _parse_custom_recipe_annotation(
     if annotation_type == "INGREDIENT":
         description = annotation_data.get("description")
         if isinstance(description, str):
-            return CookidooIngredientAnnotation(slot, description, name)
+            return CookidooIngredientAnnotation(slot, description, name, offset)
     if annotation_type == "TTS":
         time = annotation_data.get("time")
-        speed = annotation_data.get("speed")
         direction = annotation_data.get("direction")
         return CookidooTTSAnnotation(
             slot=slot,
@@ -632,14 +649,15 @@ def _parse_custom_recipe_annotation(
             temperature=_parse_annotation_temperature(
                 annotation_data.get("temperature")
             ),
-            speed=speed if isinstance(speed, str) else None,
+            speed=_speed_text(annotation_data.get("speed")),
             direction=direction if isinstance(direction, str) else None,
             name=name,
+            offset=offset,
+            extra={k: v for k, v in annotation_data.items() if k not in _TTS_FIELDS},
         )
     if annotation_type == "MODE":
         mode = name or annotation_data.get("mode") or ""
         time = annotation_data.get("time")
-        speed = annotation_data.get("speed")
         direction = annotation_data.get("direction")
         power = annotation_data.get("power")
         accessory = annotation_data.get("accessory")
@@ -650,17 +668,20 @@ def _parse_custom_recipe_annotation(
             temperature=_parse_annotation_temperature(
                 annotation_data.get("temperature")
             ),
-            speed=speed if isinstance(speed, str) else None,
+            speed=_speed_text(annotation_data.get("speed")),
             direction=direction if isinstance(direction, str) else None,
             power=power if isinstance(power, str) else None,
             accessory=accessory if isinstance(accessory, str) else None,
             name=name,
+            offset=offset,
+            extra={k: v for k, v in annotation_data.items() if k not in _MODE_FIELDS},
         )
     return CookidooCustomAnnotation(
         type=annotation_type,
         slot=slot,
         data=annotation_data,
         name=name,
+        offset=offset,
     )
 
 
@@ -748,6 +769,9 @@ def cookidoo_custom_recipe_from_json(
         else {}
     )
     raw_work_status = recipe.get("workStatus", "PRIVATE")
+    raw_instructions = _raw_instructions(
+        recipe_content.get("instructions") or recipe_content.get("recipeInstructions")
+    )
 
     return CookidooCustomRecipe(
         id=recipe["recipeId"],
@@ -774,7 +798,26 @@ def cookidoo_custom_recipe_from_json(
         requires_annotations_check=bool(
             metadata.get("requiresAnnotationsCheck", False)
         ),
+        raw_instructions=raw_instructions,
     )
+
+
+def _raw_instructions(value: object) -> list[Mapping[str, object]] | None:
+    """Copy the instructions as received, so an update can echo them verbatim.
+
+    Plain strings (the legacy shape) become ``STEP`` items; anything that is
+    neither a string nor an object is dropped. ``None`` when the field is
+    missing or not a list.
+    """
+    if not isinstance(value, Sequence) or isinstance(value, str):
+        return None
+    result: list[Mapping[str, object]] = []
+    for item in value:
+        if isinstance(item, str):
+            result.append({"type": "STEP", "text": item})
+        elif isinstance(item, Mapping):
+            result.append(copy.deepcopy(dict(item)))
+    return result
 
 
 def cookidoo_ingredient_from_json(

@@ -290,8 +290,10 @@ UpdateCustomRecipeJSON = TypedDict(
     "UpdateCustomRecipeJSON",
     {
         "name": str,
-        "image": str | None,
-        "isImageOwnedByUser": bool,
+        # Left out to keep the current photo (the server treats the PATCH
+        # as partial for these two).
+        "image": NotRequired[str | None],
+        "isImageOwnedByUser": NotRequired[bool],
         "tools": list[str],
         "yield": CustomRecipeYieldJSON,
         "prepTime": int,
