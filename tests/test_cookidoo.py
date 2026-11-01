@@ -4918,8 +4918,10 @@ class TestUpdateCustomRecipe:
         )
         payload = update_request.kwargs["json"]
         assert payload["name"] == "Updated without image echo"
-        assert payload["image"] is None
-        assert payload["isImageOwnedByUser"] is False
+        # Not recoverable as a customer-recipe path: left out of the PATCH so
+        # the server keeps whatever it has, rather than receiving null.
+        assert "image" not in payload
+        assert "isImageOwnedByUser" not in payload
 
     async def test_update_preserves_customer_image_from_cdn_url(
         self, mocked: aioresponses, cookidoo: Cookidoo
@@ -4957,10 +4959,10 @@ class TestUpdateCustomRecipe:
         assert payload["image"] == image_path
         assert payload["isImageOwnedByUser"] is True
 
-    async def test_update_rejects_unrecognized_owned_image(
+    async def test_update_leaves_out_unrecognized_owned_image(
         self, mocked: aioresponses, cookidoo: Cookidoo
     ) -> None:
-        """Stop before PATCH if an existing user photo cannot be preserved."""
+        """An owned photo that cannot be re-sent is left out, not nulled."""
         url = "https://cookidoo.ch/created-recipes/de-CH/image-recipe"
         response: CustomRecipeJSON = {
             "recipeId": "image-recipe",
@@ -4976,14 +4978,17 @@ class TestUpdateCustomRecipe:
                 "isImageOwnedByUser": True,
             },
         }
-        mocked.get(url, payload=response, status=HTTPStatus.OK)
+        mocked.get(url, payload=response, status=HTTPStatus.OK, repeat=True)
+        mocked.patch(url, status=HTTPStatus.NO_CONTENT)
 
-        with pytest.raises(ValueError, match="Cannot preserve"):
-            await cookidoo.update_custom_recipe(
-                "image-recipe", CookidooUpdateCustomRecipe(unit_text="serving")
-            )
+        await cookidoo.update_custom_recipe(
+            "image-recipe", CookidooUpdateCustomRecipe(unit_text="serving")
+        )
 
-        assert not any(method == "patch" for method, _ in mocked.requests)
+        payload = mocked.requests[("patch", URL(url))][0].kwargs["json"]
+        assert payload["yield"] == {"value": 2, "unitText": "serving"}
+        assert "image" not in payload
+        assert "isImageOwnedByUser" not in payload
 
     async def test_update_keeps_valid_customer_recipe_image(
         self, mocked: aioresponses, cookidoo: Cookidoo
@@ -5370,8 +5375,8 @@ class TestProcessRecipeSteps:
             "length": 5,
         }
 
-    def test_repeated_slot_uses_first_occurrence(self) -> None:
-        """Preserve the previous first-match behavior for repeated slots."""
+    def test_single_annotation_on_repeated_slot_uses_first_occurrence(self) -> None:
+        """One annotation on a repeated phrase still lands on the first one."""
         steps = [
             CookidooInstruction(
                 "mix, then mix again",
@@ -5426,7 +5431,7 @@ class TestProcessRecipeSteps:
             )
         ]
 
-        with pytest.raises(ValueError, match="Annotation time must not be negative"):
+        with pytest.raises(ValueError, match="Time must not be negative"):
             Cookidoo._process_recipe_steps(steps, ingredients=[])
 
     def test_negative_mode_annotation_time_raises(self) -> None:
@@ -5440,7 +5445,7 @@ class TestProcessRecipeSteps:
             )
         ]
 
-        with pytest.raises(ValueError, match="Annotation time must not be negative"):
+        with pytest.raises(ValueError, match="Time must not be negative"):
             Cookidoo._process_recipe_steps(steps, ingredients=[])
 
     def test_empty_custom_annotation_type_raises(self) -> None:
@@ -5467,7 +5472,7 @@ class TestProcessRecipeSteps:
         """Reject negative direct instruction settings."""
         steps = [CookidooInstruction("Heat", settings=CookidooStepSettings(time=-1))]
 
-        with pytest.raises(ValueError, match="Instruction time must not be negative"):
+        with pytest.raises(ValueError, match="Time must not be negative"):
             Cookidoo._process_recipe_steps(steps, ingredients=[])
 
     def test_tts_annotation_serializes_direction(self) -> None:

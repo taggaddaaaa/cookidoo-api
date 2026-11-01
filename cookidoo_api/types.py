@@ -601,16 +601,27 @@ class CookidooTemperatureSetting:
 
 @dataclass(frozen=True, slots=True)
 class CookidooIngredientAnnotation:
-    """Reference an ingredient occurrence within an instruction."""
+    """Reference an ingredient occurrence within an instruction.
+
+    ``offset`` is the position of ``slot`` in the step text, in UTF-16 code
+    units as Cookidoo counts them. Leave it ``None`` to have it located: the
+    first whole-word occurrence after the previous annotation of the step.
+    """
 
     slot: str
     description: str
     name: str | None = None
+    offset: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
 class CookidooTTSAnnotation:
-    """Text-to-speech cooking settings anchored to an instruction slot."""
+    """Text-to-speech cooking settings anchored to an instruction slot.
+
+    ``extra`` holds data fields of the annotation this library does not
+    model; they are read from the API and written back unchanged, so an
+    edit never strips them.
+    """
 
     slot: str
     time: int | None = None
@@ -618,11 +629,16 @@ class CookidooTTSAnnotation:
     speed: str | ThermomixSpeed | None = None
     direction: str | ThermomixDirection | None = None
     name: str | None = None
+    offset: int | None = None
+    extra: Mapping[str, object] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
 class CookidooModeAnnotation:
-    """Thermomix mode settings anchored to an instruction slot."""
+    """Thermomix mode settings anchored to an instruction slot.
+
+    See :class:`CookidooTTSAnnotation` for ``offset`` and ``extra``.
+    """
 
     slot: str
     mode: str | ThermomixMode
@@ -633,6 +649,8 @@ class CookidooModeAnnotation:
     power: str | ThermomixBrowningPower | None = None
     accessory: str | ThermomixSteamingAccessory | None = None
     name: str | None = None
+    offset: int | None = None
+    extra: Mapping[str, object] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
@@ -643,6 +661,7 @@ class CookidooCustomAnnotation:
     slot: str
     data: Mapping[str, object] = field(default_factory=dict)
     name: str | None = None
+    offset: int | None = None
 
 
 CookidooAnnotation = (
@@ -751,6 +770,12 @@ class CookidooCustomRecipe:
     image_owned_by_user: bool = False
     work_status: str = "PRIVATE"
     requires_annotations_check: bool = False
+    # The instructions exactly as the API returned them. An update that does
+    # not touch the instructions sends these back verbatim, so nothing the
+    # parser does not model (fields, modes, positions) is ever lost.
+    raw_instructions: list[Mapping[str, object]] | None = field(
+        default=None, repr=False, compare=False
+    )
 
 
 @dataclass

@@ -490,7 +490,7 @@ class TestRecipeImagesAndUrls:
         instruction = result.instructions[0]
         assert isinstance(instruction, CookidooInstruction)
         assert instruction.annotations[0] == CookidooIngredientAnnotation(
-            "flour", "flour"
+            "flour", "flour", offset=4
         )
         assert instruction.annotations[1] == CookidooTTSAnnotation(
             slot="mix",
@@ -498,12 +498,14 @@ class TestRecipeImagesAndUrls:
             temperature=CookidooTemperatureSetting(100, "C"),
             speed="4",
             direction="CW",
+            offset=14,
         )
         assert isinstance(instruction.annotations[2], CookidooModeAnnotation)
         assert instruction.annotations[3] == CookidooCustomAnnotation(
             type="FUTURE",
             slot="A",
             data={"enabled": True},
+            offset=0,
         )
 
     def test_custom_recipe_hints_list_is_preserved(self) -> None:
@@ -573,6 +575,7 @@ class TestRecipeImagesAndUrls:
             type="INGREDIENT",
             slot="t",
             data={"description": 42},
+            offset=0,
         )
         assert _parse_annotation_temperature({"value": 1.5}) is None
         assert _parse_custom_recipe_annotation(
