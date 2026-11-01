@@ -4,6 +4,7 @@ from dataclasses import asdict
 import logging
 from pathlib import Path
 import stat
+import sys
 
 from aiohttp import ClientSession
 import pytest
@@ -94,7 +95,10 @@ async def test_save_token_writes_private_file(
         )
         client.save_token(token_file)
 
-        assert stat.S_IMODE(token_file.stat().st_mode) == 0o600
+        # Windows has no POSIX permission bits (chmod only toggles read-only),
+        # so the owner-only mode is asserted on POSIX platforms only.
+        if sys.platform != "win32":
+            assert stat.S_IMODE(token_file.stat().st_mode) == 0o600
         assert '"refresh_token": "SENSITIVE_REFRESH"' in token_file.read_text(
             encoding="utf-8"
         )
