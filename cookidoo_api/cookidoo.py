@@ -160,7 +160,7 @@ class Cookidoo:
     def __init__(
         self,
         session: ClientSession,
-        cfg: CookidooConfig = CookidooConfig(),
+        cfg: CookidooConfig | None = None,
         on_auth_data_update: Callable[[CookidooAuthData], None] | None = None,
     ) -> None:
         """Init function for Cookidoo API.
@@ -172,7 +172,8 @@ class Cookidoo:
             Must use a ``CookieJar(unsafe=True)`` to support cross-domain
             cookies during the OAuth2 login flow.
         cfg
-            Cookidoo config
+            Cookidoo config. Defaults to a fresh :class:`CookidooConfig` per
+            instance, so clients never share (and mutate) one config object.
         on_auth_data_update
             Optional callback invoked with the new :class:`CookidooAuthData`
             whenever the tokens change, i.e. after a login and after every
@@ -182,7 +183,7 @@ class Cookidoo:
 
         """
         self._session = session
-        self._cfg = cfg
+        self._cfg = cfg if cfg is not None else CookidooConfig()
         self._on_auth_data_update = on_auth_data_update
         self._api_headers = DEFAULT_API_HEADERS.copy()
         self._logged_in = False
@@ -747,6 +748,11 @@ class Cookidoo:
     def save_token(self, path: str | Path) -> None:
         """Save the OAuth2 tokens to a file for later reuse.
 
+        The file holds a live refresh token, so it is created with mode
+        ``0o600`` (owner read/write only) regardless of the process umask, and
+        an existing file is truncated rather than replaced so its permissions
+        are tightened too.
+
         Parameters
         ----------
         path
@@ -755,7 +761,12 @@ class Cookidoo:
         """
         if (auth_data := self.auth_data) is None:
             raise CookidooConfigException("Cannot save token: not logged in.")
-        Path(path).write_text(json.dumps(vars(auth_data)), encoding="utf-8")
+        payload = json.dumps(vars(auth_data))
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as file:
+            file.write(payload)
+        # O_CREAT only applies the mode to new files; enforce it on existing ones.
+        os.chmod(path, 0o600)
 
     def load_token(self, path: str | Path) -> None:
         """Restore the OAuth2 tokens from a file saved with :meth:`save_token`.

@@ -179,5 +179,7 @@ To release a prerelease version, it must be done from a feature branch (**not** 
 ## Roadmap
 
 - [x] Add custom recipes to calendar and shopping list
-- [ ] Edit custom recipes
-- [ ] Create blank custom recipes (not copy existing)
+- [x] Edit custom recipes (`update_custom_recipe`)
+- [x] Create blank custom recipes with guided-cooking steps (`create_custom_recipe`)
+- [ ] Upload a photo for a custom recipe
+- [ ] Explicit annotation positions (same phrase used twice in one step)

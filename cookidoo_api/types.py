@@ -139,7 +139,8 @@ class CookidooConfig:
         default_factory=CookidooLocalizationConfig
     )
     email: str = "your@email"
-    password: str = "1234password!"
+    # Kept out of repr() so the password never lands in logs or tracebacks.
+    password: str = field(default="1234password!", repr=False)
     client_id: str = OAUTH_CLIENT_ID
     redirect_uri: str = OAUTH_REDIRECT_URI
 
@@ -221,10 +222,13 @@ class CookidooAuthData:
     """OAuth2 tokens obtained from a login, for persistence and restore.
 
     ``expires_at`` is a POSIX timestamp (seconds) for the access token.
+
+    Both tokens are kept out of ``repr()`` so that logging or printing the
+    object never exposes them; ``vars()`` and ``asdict()`` still include them.
     """
 
-    access_token: str
-    refresh_token: str
+    access_token: str = field(repr=False)
+    refresh_token: str = field(repr=False)
     expires_at: float
 
 
