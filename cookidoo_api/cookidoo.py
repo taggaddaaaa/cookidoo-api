@@ -3138,6 +3138,8 @@ class Cookidoo:
                 "add custom collection",
                 json=json_data,
                 headers={"ACCEPT": CUSTOM_COLLECTIONS_PATH_ACCEPT},
+                # Cookidoo FR answers 201 Created (seen 2 November 2026).
+                accepted_statuses=(HTTPStatus.OK, HTTPStatus.CREATED),
             ),
             "add custom collection",
         )
