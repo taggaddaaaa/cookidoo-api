@@ -3499,15 +3499,16 @@ class TestGetCustomLists:
 class TestAddCustomCollection:
     """Tests for add_custom_collection method."""
 
+    @pytest.mark.parametrize("status", [HTTPStatus.OK, HTTPStatus.CREATED])
     async def test_add_custom_collection(
-        self, mocked: aioresponses, cookidoo: Cookidoo
+        self, mocked: aioresponses, cookidoo: Cookidoo, status: HTTPStatus
     ) -> None:
-        """Test for add_custom_collection."""
+        """Test for add_custom_collection (Cookidoo FR answers 201 Created)."""
 
         mocked.post(
             "https://cookidoo.ch/organize/de-CH/api/custom-list",
             payload=COOKIDOO_TEST_RESPONSE_ADD_CUSTOM_COLLECTION,
-            status=HTTPStatus.OK,
+            status=status,
         )
 
         data = await cookidoo.add_custom_collection("Testliste")
